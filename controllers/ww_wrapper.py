@@ -2,49 +2,40 @@ import subprocess
 import threading
 import sys
 from typing import Callable
-from pathlib import Path
 
-from utils.helpers import find_ww_executable, sanitize_input
+from utils.runtime_manager import RuntimeManager, RuntimeMode
+from utils.helpers import sanitize_input
 from utils.parser import WWOutputParser, ProgressUpdate
+
+# instance مشترك في كل البرنامج
+_runtime = RuntimeManager()
+_runtime.detect()
+
+
+def get_runtime() -> RuntimeManager:
+    """الحصول على الـ RuntimeManager المشترك"""
+    return _runtime
 
 
 class WWWrapper:
     """
     غلاف subprocess للـ WebWormhole CLI
-
-    المسؤوليات:
-    ───────────
-    1. تنفيذ أوامر ww
-    2. قراءة output بشكل streaming
-    3. تمرير التحديثات للـ callbacks
-    4. إدارة إلغاء العملية
-
-    مثال الاستخدام:
-    ───────────────
-    wrapper = WWWrapper()
-    wrapper.send(
-        filepath="/path/to/file.zip",
-        on_update=lambda u: print(u.progress_percent),
-        on_complete=lambda: print("Done!"),
-        on_error=lambda e: print(f"Error: {e}"),
-    )
+    يدعم CLI Mode و Embedded Mode تلقائياً
     """
 
     def __init__(self):
         self._process: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
-        self._ww_path: str | None = find_ww_executable()
+        self._cancelled: bool = False   # ← flag لتمييز الإلغاء عن الخطأ
 
-    # ─────────────────────────────────────────
-    # التحقق من وجود ww
-    # ─────────────────────────────────────────
     @property
     def is_available(self) -> bool:
-        """هل ww مثبت ومتاح؟"""
-        return self._ww_path is not None
+        return _runtime.is_available
 
-    # ─────────────────────────────────────────
-    # إرسال ملف
+    @property
+    def runtime_mode(self) -> RuntimeMode:
+        return _runtime.mode
+
     # ─────────────────────────────────────────
     def send(
         self,
@@ -53,34 +44,17 @@ class WWWrapper:
         on_complete: Callable[[], None] | None = None,
         on_error: Callable[[str], None] | None = None,
     ) -> None:
-        """
-        تنفيذ: ww send <filepath>
-
-        يعمل في خيط منفصل لعدم تجميد الـ UI
-        """
         if not self.is_available:
             if on_error:
-                on_error("ww غير مثبت")
+                on_error("ww غير متاح")
             return
 
-        # تنظيف المدخلات
         safe_path = sanitize_input(filepath)
-
-        self._thread = threading.Thread(
-            target=self._run_command,
-            args=(
-                [self._ww_path, "send", safe_path],
-                on_update,
-                on_complete,
-                on_error,
-            ),
-            daemon=True,
+        self._run_async(
+            [_runtime.ww_path, "send", safe_path],
+            on_update, on_complete, on_error,
         )
-        self._thread.start()
 
-    # ─────────────────────────────────────────
-    # استقبال ملف
-    # ─────────────────────────────────────────
     def receive(
         self,
         code: str,
@@ -89,35 +63,20 @@ class WWWrapper:
         on_complete: Callable[[], None] | None = None,
         on_error: Callable[[str], None] | None = None,
     ) -> None:
-        """
-        تنفيذ: ww receive <code>
-
-        يعمل في خيط منفصل لعدم تجميد الـ UI
-        """
         if not self.is_available:
             if on_error:
-                on_error("ww غير مثبت")
+                on_error("ww غير متاح")
             return
 
         safe_code = sanitize_input(code)
-        cmd = [self._ww_path, "receive", safe_code]
-
-        # تغيير مجلد العمل لتحديد مكان الحفظ
-        cwd = save_dir if save_dir else None
-
-        self._thread = threading.Thread(
-            target=self._run_command,
-            args=(cmd, on_update, on_complete, on_error),
-            kwargs={"cwd": cwd},
-            daemon=True,
+        self._run_async(
+            [_runtime.ww_path, "receive", safe_code],
+            on_update, on_complete, on_error,
+            cwd=save_dir,
         )
-        self._thread.start()
 
-    # ─────────────────────────────────────────
-    # إلغاء العملية
-    # ─────────────────────────────────────────
     def cancel(self) -> None:
-        """إيقاف عملية ww الجارية"""
+        self._cancelled = True
         if self._process and self._process.poll() is None:
             self._process.terminate()
             try:
@@ -126,57 +85,57 @@ class WWWrapper:
                 self._process.kill()
 
     # ─────────────────────────────────────────
-    # تنفيذ الأمر (داخلي)
-    # ─────────────────────────────────────────
-    def _run_command(
+    def _run_async(
         self,
         cmd: list[str],
-        on_update: Callable[[ProgressUpdate], None] | None,
-        on_complete: Callable[[], None] | None,
-        on_error: Callable[[str], None] | None,
+        on_update, on_complete, on_error,
         cwd: str | None = None,
     ) -> None:
-        """
-        تنفيذ الأمر وقراءة output بشكل streaming
+        self._cancelled = False   # ← reset عند كل عملية جديدة
+        self._thread = threading.Thread(
+            target=self._run_command,
+            args=(cmd, on_update, on_complete, on_error),
+            kwargs={"cwd": cwd},
+            daemon=True,
+        )
+        self._thread.start()
 
-        التدفق:
-        ┌──────────┐    ┌──────────┐    ┌──────────┐
-        │  Popen   │───►│  قراءة  │───►│ callback │
-        │  (cmd)   │    │  stdout │    │  update  │
-        └──────────┘    └──────────┘    └──────────┘
-        """
+    def _run_command(
+        self,
+        cmd, on_update, on_complete, on_error,
+        cwd=None,
+    ) -> None:
         parser = WWOutputParser()
-
         try:
             self._process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # دمج stderr مع stdout
+                stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1,                 # line buffered
+                bufsize=1,
                 cwd=cwd,
-                # منع ظهور نافذة cmd على Windows
                 creationflags=(
                     subprocess.CREATE_NO_WINDOW
                     if sys.platform == "win32" else 0
                 ),
             )
-
-            # ── قراءة output سطراً بسطر ──
             for line in self._process.stdout:
                 update = parser.parse_line(line)
-
-                if on_update:
+                if on_update and (
+                    update.session_code
+                    or update.progress_percent is not None
+                    or update.is_complete
+                    or update.error_message
+                ):
                     on_update(update)
-
-                # اكتملت العملية؟
                 if update.is_complete:
                     break
 
-            # انتظار انتهاء العملية
             self._process.wait()
 
-            # ── تحديد النتيجة ──
+            if self._cancelled:
+                return   # ← المستخدم ألغى — لا نُطلق on_error
+
             if self._process.returncode == 0:
                 if on_complete:
                     on_complete()
@@ -185,12 +144,11 @@ class WWWrapper:
                     on_error(
                         f"فشل ww برمز الخروج: {self._process.returncode}"
                     )
-
         except FileNotFoundError:
             if on_error:
-                on_error(f"الأمر غير موجود: {cmd[0]}")
+                on_error(f"الملف غير موجود: {cmd[0]}")
         except Exception as e:
-            if on_error:
+            if not self._cancelled and on_error:
                 on_error(str(e))
         finally:
             self._process = None

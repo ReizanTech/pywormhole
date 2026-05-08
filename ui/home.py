@@ -2,8 +2,6 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable
 
-from utils.helpers import find_ww_executable
-
 
 class HomeScreen(ttk.Frame):
     """
@@ -13,12 +11,12 @@ class HomeScreen(ttk.Frame):
     │  🪱 PyWormhole              │
     │  نقل ملفات آمن P2P         │
     │                             │
-    │  ✅ ww: متصل                │
+    │  ✅ ww: جاهز — CLI Mode    │
     │                             │
     │  [ 📤 إرسال ملف ]          │
     │  [ 📥 استقبال ملف ]        │
     │                             │
-    │  v1.0 | webwormhole.io     │
+    │  ⚙️ إعداد WebWormhole CLI  │
     └─────────────────────────────┘
     """
 
@@ -29,12 +27,16 @@ class HomeScreen(ttk.Frame):
         on_receive: Callable,
     ):
         super().__init__(parent, padding=30)
-        self.on_send = on_send
+        self.on_send    = on_send
         self.on_receive = on_receive
         self._build_ui()
-        self._check_ww()
+        self._refresh_status()
 
+    # ─────────────────────────────────────────────────────
+    # بناء الواجهة
+    # ─────────────────────────────────────────────────────
     def _build_ui(self) -> None:
+
         # ── الشعار ──
         ttk.Label(
             self,
@@ -55,18 +57,54 @@ class HomeScreen(ttk.Frame):
             foreground="gray",
         ).pack(pady=(3, 20))
 
-        # ── حالة ww ──
-        self.ww_status_var = tk.StringVar(value="⏳ جارٍ التحقق...")
-        self.ww_status_label = ttk.Label(
+        # ── كارد حالة ww ──
+        status_card = tk.Frame(
             self,
-            textvariable=self.ww_status_var,
-            font=("Helvetica", 10),
+            bg="#F1F5F9",
+            padx=12,
+            pady=10,
+            relief="flat",
         )
-        self.ww_status_label.pack(pady=(0, 20))
+        status_card.pack(fill="x", pady=(0, 15))
 
-        ttk.Separator(self, orient="horizontal").pack(fill="x", pady=10)
+        # أيقونة الحالة
+        self._status_icon_var = tk.StringVar(value="⏳")
+        tk.Label(
+            status_card,
+            textvariable=self._status_icon_var,
+            bg="#F1F5F9",
+            font=("Helvetica", 14),
+        ).pack(side="left", padx=(0, 8))
 
-        # ── الأزرار ──
+        # نص الحالة
+        info = tk.Frame(status_card, bg="#F1F5F9")
+        info.pack(side="left", fill="x", expand=True)
+
+        self._status_main_var = tk.StringVar(value="جارٍ التحقق...")
+        self._status_main_lbl = tk.Label(
+            info,
+            textvariable=self._status_main_var,
+            bg="#F1F5F9",
+            font=("Helvetica", 10, "bold"),
+            anchor="w",
+        )
+        self._status_main_lbl.pack(fill="x")
+
+        self._status_sub_var = tk.StringVar(value="")
+        tk.Label(
+            info,
+            textvariable=self._status_sub_var,
+            bg="#F1F5F9",
+            font=("Helvetica", 8),
+            fg="gray",
+            anchor="w",
+        ).pack(fill="x")
+
+        ttk.Separator(self, orient="horizontal").pack(
+            fill="x", pady=5
+        )
+
+        # ── أزرار الإرسال والاستقبال ──
         self.btn_send = ttk.Button(
             self,
             text="📤  إرسال ملف",
@@ -83,18 +121,20 @@ class HomeScreen(ttk.Frame):
         )
         self.btn_receive.pack(pady=8, ipady=12)
 
-        ttk.Separator(self, orient="horizontal").pack(fill="x", pady=15)
+        ttk.Separator(self, orient="horizontal").pack(
+            fill="x", pady=15
+        )
 
-        # ── رابط التثبيت ──
-        install_label = ttk.Label(
+        # ── رابط الإعداد ──
+        setup_lbl = ttk.Label(
             self,
-            text="كيفية تثبيت ww CLI ؟",
+            text="⚙️  إعداد WebWormhole CLI",
             foreground="#2563EB",
             cursor="hand2",
             font=("Helvetica", 9, "underline"),
         )
-        install_label.pack()
-        install_label.bind("<Button-1>", self._show_install_guide)
+        setup_lbl.pack()
+        setup_lbl.bind("<Button-1>", self._show_install_guide)
 
         ttk.Label(
             self,
@@ -103,41 +143,65 @@ class HomeScreen(ttk.Frame):
             foreground="gray",
         ).pack(pady=(10, 0))
 
-    def _check_ww(self) -> None:
-        """التحقق من وجود ww وتحديث الحالة"""
-        ww_path = find_ww_executable()
+    # ─────────────────────────────────────────────────────
+    # تحديث حالة ww
+    # ─────────────────────────────────────────────────────
+    def _refresh_status(self) -> None:
+        """
+        قراءة وضع التشغيل وتحديث الواجهة
 
-        if ww_path:
-            self.ww_status_var.set(f"✅ ww: جاهز  ({ww_path})")
-            self.ww_status_label.config(foreground="green")
-            self.btn_send.config(state="normal")
-            self.btn_receive.config(state="normal")
-        else:
-            self.ww_status_var.set("❌ ww: غير مثبت — انقر للمساعدة")
-            self.ww_status_label.config(foreground="red")
-            self.btn_send.config(state="disabled")
-            self.btn_receive.config(state="disabled")
-            self.ww_status_label.bind(
-                "<Button-1>", self._show_install_guide
-            )
+        RuntimeMode.CLI_GLOBAL → ✅ أخضر
+        RuntimeMode.EMBEDDED   → ✅ أخضر
+        RuntimeMode.NOT_FOUND  → ❌ أحمر
+        """
+        try:
+            from controllers.ww_wrapper import get_runtime
+            from utils.runtime_manager import RuntimeMode
 
+            rt   = get_runtime()
+            mode = rt.mode
+
+        except Exception:
+            # لو فيه خطأ في الاستيراد
+            self._status_icon_var.set("⚠️")
+            self._status_main_var.set("خطأ في تحميل RuntimeManager")
+            self._status_main_lbl.config(fg="#92400E")
+            return
+
+        if mode == RuntimeMode.CLI_GLOBAL:
+            self._status_icon_var.set("✅")
+            self._status_main_var.set("ww جاهز")
+            self._status_sub_var.set(f"CLI Mode — {rt.ww_path}")
+            self._status_main_lbl.config(fg="#166534")
+            self._set_buttons("normal")
+
+        elif mode == RuntimeMode.EMBEDDED:
+            self._status_icon_var.set("✅")
+            self._status_main_var.set("ww جاهز")
+            self._status_sub_var.set(f"Embedded Mode — {rt.ww_path}")
+            self._status_main_lbl.config(fg="#166534")
+            self._set_buttons("normal")
+
+        else:  # NOT_FOUND
+            self._status_icon_var.set("❌")
+            self._status_main_var.set("ww غير موجود — انقر للإعداد")
+            self._status_sub_var.set("اضغط على الرابط أدناه للتثبيت")
+            self._status_main_lbl.config(fg="#991B1B")
+            self._set_buttons("disabled")
+
+    def _set_buttons(self, state: str) -> None:
+        """تفعيل أو تعطيل أزرار الإرسال والاستقبال"""
+        self.btn_send.config(state=state)
+        self.btn_receive.config(state=state)
+
+    # ─────────────────────────────────────────────────────
+    # نافذة الإعداد
+    # ─────────────────────────────────────────────────────
     def _show_install_guide(self, event=None) -> None:
         """فتح نافذة دليل التثبيت"""
         from ui.install_guide import InstallGuideWindow
 
         InstallGuideWindow(
             self,
-            on_recheck=self._recheck_ww,
+            on_recheck=self._refresh_status,
         )
-
-    def _recheck_ww(self) -> None:
-        """إعادة التحقق من ww بعد التثبيت"""
-        ww_path = find_ww_executable()
-        if ww_path:
-            self.ww_status_var.set(f"✅ ww: جاهز  ({ww_path})")
-            self.ww_status_label.config(foreground="green")
-            self.btn_send.config(state="normal")
-            self.btn_receive.config(state="normal")
-        else:
-            self.ww_status_var.set("❌ ww: غير مثبت — انقر للمساعدة")
-            self.ww_status_label.config(foreground="red")

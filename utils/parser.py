@@ -70,8 +70,11 @@ class WWOutputParser:
 
         # ────────────────────────────────────────────────
         # 3. تجاهل سطور الـ QR (تحتوي على █ أو ▄ أو ▀)
+        #    لكن فقط إذا لم تحتوِ على نسبة مئوية —
+        #    لأن progress bars مثل "50% |████|" تحتوي أيضاً
+        #    على block chars ويجب ألّا تُتجاهَل.
         # ────────────────────────────────────────────────
-        if re.search(r'[█▄▀]', line_stripped):
+        if re.search(r'[█▄▀]', line_stripped) and not re.search(r'\d+\s*%', line_stripped):
             return ProgressUpdate()
 
         # ────────────────────────────────────────────────
@@ -121,6 +124,6 @@ class WWOutputParser:
 def validate_session_code(code: str) -> bool:
     """
     التحقق من صحة تنسيق كود الجلسة
-    التنسيق: word-word-word
+    التنسيق: word-word-word (أحرف صغيرة فقط، كما يُنتجها ww)
     """
-    return bool(re.match(r'^[a-z]+-[a-z]+-[a-z]+$', code.strip().lower()))
+    return bool(re.match(r'^[a-z]+-[a-z]+-[a-z]+$', code.strip()))
